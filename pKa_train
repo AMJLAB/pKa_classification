@@ -19,7 +19,7 @@ def read_train(path):
         if df.shape[1] >= 3:
             break
 
-    # drop empty cols 
+    # drop empty columnss 
     df = df.dropna(axis=1, how="all")
 
     if df.shape[1] == 4:
