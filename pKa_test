@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from rdkit import Chem
+from rdkit.Chem import AllChem
+import joblib
+
+N_BITS = 2048
+RADIUS = 2
+
+TEST_FILE = "RF_pKa_New_2_test.csv"
+MODEL_FILE = "rf_pka_model.joblib"
+
+
+def split_two_fields(s: pd.Series) -> pd.DataFrame:
+    """Split a single string series into 2 fields (reaction, solvent) using tab/comma/space."""
+    s = s.astype(str).str.strip()
+
+    parts = s.str.split(r"\t+", expand=True)
+    if parts.shape[1] < 2:
+        parts = s.str.split(r",+", expand=True)
+    if parts.shape[1] < 2:
+        parts = s.str.split(r"\s+", expand=True)
+
+    if parts.shape[1] < 2:
+        return None
+
+    out = parts.iloc[:, :2].copy()
+    out.columns = ["reaction", "solvent"]
+    return out
+
+
+def read_test(path):
+    # read very permissively first
+    df = pd.read_csv(path, header=None, sep=None, engine="python", dtype=str)
+    df = df.dropna(axis=1, how="all")
+
+    # Case A: already 3+ columns, take first 3
+    if df.shape[1] >= 3:
+        df = df.iloc[:, :3].copy()
+        df.columns = ["idx", "reaction", "solvent"]
+        return df
+
+    # Case B, exactly 2 columns
+    if df.shape[1] == 2:
+        c0 = df.iloc[:, 0].astype(str).str.strip()
+        c1 = df.iloc[:, 1].astype(str).str.strip()
+
+        # Try interpret as idx | "reaction solvent"
+        maybe = split_two_fields(c1)
+        if maybe is not None:
+            out = pd.DataFrame({"idx": c0})
+            out["reaction"] = maybe["reaction"]
+            out["solvent"] = maybe["solvent"]
+            return out
+
+        # Else interpret as: reaction | solvent (no idx)
+        out = df.iloc[:, :2].copy()
+        out.columns = ["reaction", "solvent"]
+        out.insert(0, "idx", range(1, len(out) + 1))
+        return out
+
+    # Case C: exactly 1 column, split into 3 fields
+    if df.shape[1] == 1:
+        s = df.iloc[:, 0].astype(str).str.strip()
+        parts = s.str.split(r"\t+|,+|\s+", expand=True)
+        if parts.shape[1] < 3:
+            raise ValueError("1-column test file but cannot split into 3 fields.")
+        parts = parts.iloc[:, :3].copy()
+        parts.columns = ["idx", "reaction", "solvent"]
+        return parts
+
+    raise ValueError(f"Unsupported test shape: {df.shape}")
+
+
+def fp_one(smiles):
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None
+    arr = np.zeros(N_BITS, dtype=np.float32)
+    fp = AllChem.GetHashedMorganFingerprint(mol, RADIUS, nBits=N_BITS)
+    for k, v in fp.GetNonzeroElements().items():
+        arr[k] += v
+    return arr
+
+
+def fp_multi(smiles):
+    parts = [p.strip() for p in str(smiles).split(".") if p.strip()]
+    if not parts:
+        return None
+    out = np.zeros(N_BITS, dtype=np.float32)
+    for p in parts:
+        v = fp_one(p)
+        if v is None:
+            return None
+        out += v
+    return out
+
+
+def reaction_fp(rxn, solvent):
+    rxn = str(rxn).strip()
+    if ">>" not in rxn:
+        return None
+    left, right = rxn.split(">>", 1)
+
+    rfp = fp_multi(left)
+    pfp = fp_multi(right)
+    sfp = fp_multi(solvent)
+
+    if rfp is None or pfp is None or sfp is None:
+        return None
+    return np.concatenate([pfp - rfp, sfp])
+
+
+print("Loading model...")
+model = joblib.load(MODEL_FILE)
+
+print("Reading test data...")
+df = read_test(TEST_FILE)
+print("Parsed test shape:", df.shape)
+print("Columns:", list(df.columns))
+
+X, keep = [], []
+for i, row in df.iterrows():
+    feat = reaction_fp(row["reaction"], row["solvent"])
+    if feat is None:
+        continue
+    X.append(feat)
+    keep.append(i)
+
+X = np.asarray(X, dtype=np.float32)
+print("Valid test samples:", X.shape[0])
+
+preds = model.predict(X)
+
+out = df.loc[keep].copy()
+out["pKa_pred"] = preds
+out.to_csv("RF_pKa_New_2_test_predictions.csv", index=False)
+print("Saved â†’ Ajitha_Pka_test_predictions.csv")
+
