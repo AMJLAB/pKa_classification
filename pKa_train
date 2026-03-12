@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from rdkit import Chem
+from rdkit.Chem import AllChem
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import KFold, RandomizedSearchCV
+import joblib
+
+N_BITS = 2048
+RADIUS = 2
+SEED = 42
+
+TRAIN_FILE = "RF_pKa_New_2_train.csv"
+
+def read_train(path):
+        for sep in ["\t", ",", r"\s+"]:
+        df = pd.read_csv(path, header=None, sep=sep, engine="python", dtype=str)
+        if df.shape[1] >= 3:
+            break
+
+    # drop empty cols 
+    df = df.dropna(axis=1, how="all")
+
+    if df.shape[1] == 4:
+        df = df.iloc[:, :4].copy()
+        df.columns = ["idx", "reaction", "solvent", "pKa"]
+    elif df.shape[1] == 3:
+        df = df.iloc[:, :3].copy()
+        df.columns = ["reaction", "solvent", "pKa"]
+        df.insert(0, "idx", range(1, len(df) + 1))
+    else:
+        raise ValueError(f"Unexpected number of columns in train: {df.shape[1]}")
+    return df
+
+
+def fp_one(smiles):
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None
+    arr = np.zeros(N_BITS, dtype=np.float32)
+    fp = AllChem.GetHashedMorganFingerprint(mol, RADIUS, nBits=N_BITS)
+    for k, v in fp.GetNonzeroElements().items():
+        arr[k] += v
+    return arr
+
+
+def fp_multi(smiles):
+    parts = [p.strip() for p in str(smiles).split(".") if p.strip()]
+    if not parts:
+        return None
+    out = np.zeros(N_BITS, dtype=np.float32)
+    for p in parts:
+        v = fp_one(p)
+        if v is None:
+            return None
+        out += v
+    return out
+
+
+def rxn_feat(rxn, solvent):
+    rxn = str(rxn).strip()
+    if ">>" not in rxn:
+        return None
+    left, right = rxn.split(">>", 1)
+
+    rfp = fp_multi(left)
+    pfp = fp_multi(right)
+    sfp = fp_multi(solvent)
+
+    if rfp is None or pfp is None or sfp is None:
+        return None
+    return np.concatenate([pfp - rfp, sfp])
+
+
+print("Reading training data...")
+df = read_train(TRAIN_FILE)
+print("Columns read:", list(df.columns))
+print("Rows:", len(df))
+
+X, y = [], []
+for _, row in df.iterrows():
+    feat = rxn_feat(row["reaction"], row["solvent"])
+    if feat is None:
+        continue
+    try:
+        pka = float(str(row["pKa"]).strip())
+    except Exception:
+        continue
+    X.append(feat)
+    y.append(pka)
+
+X = np.asarray(X, dtype=np.float32)
+y = np.asarray(y, dtype=np.float32)
+print("Valid training samples:", X.shape[0])
+
+rf = RandomForestRegressor(random_state=SEED, n_jobs=-1)
+
+param_grid = {
+    "n_estimators": [300, 600, 1000],
+    "max_depth": [None, 20, 50],
+    "min_samples_leaf": [1, 2, 4],
+    "max_features": ["sqrt", 0.5],
+}
+
+cv = KFold(n_splits=5, shuffle=True, random_state=SEED)
+
+search = RandomizedSearchCV(
+    rf, param_grid,
+    n_iter=20,
+    scoring="neg_mean_absolute_error",
+    cv=cv,
+    n_jobs=-1,
+    random_state=SEED,
+    verbose=1,
+)
+
+print("Running CV + hyperparameter tuning...")
+search.fit(X, y)
+
+best = search.best_estimator_
+print("Best params:", search.best_params_)
+print("Best CV MAE:", -search.best_score_)
+
+best.fit(X, y)
+joblib.dump(best, "rf_pka_model.joblib")
+print("Saved model: rf_pka_model.joblib")
+
