@@ -1,0 +1,1 @@
+This repository contains the random forest model for pKa prediction. The dataset is extracted from "Solvation Free Energies of Anions: From Curated Reference Data to Predictive Models" by Thomas NevolianisJonathan W ZhengSimon MüllerMatthias BaumannSofja TshepelevitshIvari KaljurandIvo LeitoIrina SmirnovaWilliam H GreenKai Leonhard*
